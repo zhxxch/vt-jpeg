@@ -1,0 +1,12 @@
+*.jpg
+*.png
+*.bmp
+*.psd
+*.exe
+*.obj
+*.pdb
+*.pdf
+*.mute.*
+mute/
+*.mute/
+

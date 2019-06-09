@@ -1,0 +1,105 @@
+Notes on the implementation of trellis quantization in H.264
+by Loren Merritt, 2005-11-03.
+
+----------
+
+While the decoding process is standardized, the encoder has complete leeway as to what it chooses to put in the bitstream. We would of course like the encoded stream to look similar to the input video, but there are still many choices to be made in all stages of the encoding process.
+One such decision is what DCT coefficients to use. After selecting a macroblock type and motion vector, we compute the residual, which is the DCT of the difference between the input video and the inter prediction. Now we have to select the integer values used to represent those DCT coefficients: "quantization".
+
+The most obvious scalar quantization method is division. For each coefficient, pick the quantized value that's closest to the desired value. This minimizes error at a given QP, but ignores bitrate.
+
+A better method (the conventional one in most codecs) is "uniform deadzone". This works by biasing the result of division towards zero, because smaller values take fewer bits to code. This is RD-optimal assuming the coefficients are independent and follow a Laplacian distribution. (exponential probabilities => the difference between the cost of N and the cost of N+1 is constant).
+
+JM includes an "adaptive deadzone", which allows the magnitude of the Laplacian to vary over time, and vary for different frequencies. It still assumes independence between coefficients. In practice, this differs from uniform deadzone only at very high bitrates. (At low rates, the vast majority of coefficients are 0 or 1, so the spatial correlation matters much more than the order0 distribution.)
+
+Trellis further relaxes those assumptions: it uses the real cabac costs, including the effect of other coefficients in the DCT block.
+
+(not implemented in x264 yet):
+Lookahead-deadzone, instead of improving the estimate of bitcost, expands the scope of the optimization. Conventional RD considers the rate+distortion of a single macroblock at at a time, holding all others constant. Lookahead directly includes the effect of quantization decisions on both the rate and distortion of future inter-blocks and neighboring intra-blocks.
+Lookahead-trellis is theoretically possible, but might be computationally infeasible.
+
+----------
+
+Most literature assumes the distribution of coef magnitudes is i.i.d. Laplacian. This is a pretty good approximation.
+If the entropy coder actually obeyed the Laplacian distribution, then uniform-deadzone would be optimal. But the MPEG-1/2/4 residual coders differ from Laplacian in 2 ways:
+1) They use VLC. So each token must take up a whole number of bits. For some coefs, rounding up or down gives the same bit size, so you should round to nearest. For other coefs, rounding down saves a whole 1 or 2 bits, so you should round with more bias than deadzone would.
+2) They use run-level coding. So it's sometimes worth zeroing a coef in order to merge two zero runs. Or other dependencies between the cost of coding a given magnitude and the number of adjacent zeros.
+These have been exploited in [1].
+
+H.264 CAVLC is similar, though more complicated. It shouldn't affect the potential gain of trellis, but will make it much harder to implement (maybe exponential time).
+
+H.264 CABAC differs from Laplacian in other ways:
+-1) It does not require whole numbers of bits.
+-2) It does not use run-level coding; since cabac doesn't have VLC's minimum bit cost per token, each coef can have its own significance flag. So you don't directly gain anything by merging runs.
+3) If the local distribution of coefs does not match the global Laplacian, or if the average value varies locally, cabac adapts. This could also be handled by adaptive deadzone, though JVT-N011 has a different method than trellis: N011 sets the deadzone based on current (pre-quantization) coef distribution and assumes that cabac will adjust the bit costs to match; trellis sets effective deadzone based directly on current cabac bit costs.
+4) The cost of coding a given nonzero coef depends on the number and magnitude of previous nonzero coefs in the block.
+
+So, MPEG-* trellis keeps a candidate encoding for each possible run length (magnitude can be decided once, no need to keep multiple versions.)
+H.264 trellis keeps a candidate encoding for each possible combination of cabac context numbers (point 4). Point 3 is impossible to globally optimize over: there are way too many possible states, so probably the best we can do is a greedy search.
+
+----------
+
+Goal: given a 4x4 or 8x8 block of DCT coefficients, and the initial cabac context they will be encoded under, select quantized values for each coefficient so as to minimize the total rate-distortion cost.
+
+Algorithm:
+Viterbi search / Dijkstra shortest path (with some simplifications due to the regularity of the graph).
+The states to search over are (dct_index,cabac_context,level).
+This is implemented as a dynamic program, where any two states of the same (dct_index,cabac_context) are considered the same, and only the one with the best score is kept. The states are evaluated in decreasing order of dct_index, so the size of the search frontier is bounded by the number of different values of cabac_context (which is 8).
+I chose decreasing dct_index because that's the order of magnitude coding in the real cabac residual coding. Thus we can ignore the contents of each cabac state, and let the entropy coder update them as normal. In the 4x4 transform, the nonzero and last_nonzero flags use a separate cabac state for each coefficient, so their order of evaluation doesn't matter. In the 8x8 transform they are not all separate, and we have to code them in reverse of the real bitstream order, so we have to approximate their states. My approximation is to simply not update the nonzero and last_nonzero cabac states during the 8x8 trellis search. There might be better ways.
+In a conventional DCT, the basis functions are orthonormal. So a SSD between original and dequantized DCT coefficients produces the same result as a SSD between original and reconstructed pixels. (Assumes no rounding error during the iDCT; rounding is negligible compared to quantization error). H.264's transforms are not normalized, but they are still orthogonal, so the same principle works. It just requires a weighting based on the coefficient position [2].
+I only search two possible levels for each coefficient. A larger search range is possible, but gave negligible PSNR improvement (.003 dB) and was very slow.
+The pseudocode deals with coefficients' absolute values only. Signs are not entropy coded (always 1 bit each), so the optimal quantization always uses the same signs as the unquantized coefficients.
+
+Implementation note:
+Evaluating the cabac cost of a decision is much faster than encoding that decision to the bitstream. In this algorithm we do not perform any bitstream writing. Rather, each cost evaluation can be a single table lookup of entropy as a function of cabac state.
+
+----------
+
+Pseudocode:
+typedef:
+  node = ( context, cabac, score, levels )
+    context  = ( # of coefs with level==1, # of coefs with level>1 ).
+                There are only 8 different pairs for the purpose of cabac coding:
+                (0,0), (1,0), (2,0), (>=3,0), (any,1), (any,2), (any,3), (any,>=4)
+    cabac    = the states relevant to coding abs_level. (I don't have to store the nonzero and last_nonzero states in each node, since they aren't updated during the search.)
+    score    = sum of distortion+lambda*rate over coefficients processed so far
+    levels[] = the list of levels in the path leading to the current node
+
+inputs:
+  lambda     = the rate-distortion constant
+  dct[]      = the absolute values from fdct before quantization, in zigzag scan order
+  weight[]   = the normalization factors for fdct, in zigzag scan order
+  quant_mf[] = the factors to divide by in conventional quantization, in zigzag scan order
+  n_coefs    = the size of the dct block (64 (8x8), 16 (4x4), or 15 (4x4 AC))
+  cabac_in   = the state of the cabac encoder
+
+outputs:
+  levels[]   = the absolute values of the quantized coefficients
+
+code:
+  nodes_cur[0] = { (.context = 0, .cabac = cabac_in, .score = 0, .levels = {}) }
+  for( i = n_coefs-1; i >= 0; i-- )
+    nodes_prev[] = nodes_cur[]
+    q = round( dct[i] / quant_mf[i] )
+    foreach level in { max(q-1,0), q }
+      diff = ( dct[i] - level * quant_mf[i] ) * weight[i]
+      ssd = diff**2
+      foreach node in nodes_prev[] (copied, not aliased)
+        node.score += ssd + lambda * (bit cost of coding level with node.cabac)
+        update node.context and node.cabac after coding level
+        append level to node.levels[]
+        if( nodes_cur[node.context].score > node.score )
+            nodes_cur[node.context] = node
+  final_node = the element of nodes_cur[] with the lowest .score
+  levels[] = final_node.levels[]
+
+
+----------
+
+[1] "Trellis-Based R-D Optimal Quantization in H.263+"
+      J.Wen, M.Luttrell, J.Villasenor
+      IEEE Transactions on Image Processing, Vol.9, No.8, Aug. 2000.
+
+[2] "Efficient Macroblock Coding-Mode Decision for H.264/AVC Video Coding"
+      J.Xin, A.Vetro, H.Sun
+      http://www.merl.com/reports/docs/TR2004-079.pdf, Dec. 2004.
