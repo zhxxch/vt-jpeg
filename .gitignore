@@ -4,8 +4,8 @@
 *.psd
 *.exe
 *.obj
+/*.pdf
 *.pdb
-*.pdf
 *.mute.*
 mute/
 *.mute/
