@@ -1,13 +1,8 @@
-All: stat-jpeg-text.exe stat-jpeg-pixel.exe
-CFLAGS=/D_CRT_SECURE_NO_WARNINGS=1 /O2 /nologo /GL /W4 /MD /DEBUG /Zi /arch:AVX2
+All: jpeg2json.exe
 
-STATHEADERS=DHTs.h DQTs.h DRIs.h markers.h MCUs.h SOSs.h SOFs.h
+CFLAGS=/D_CRT_SECURE_NO_WARNINGS=1 /O2 /nologo /GL /W4 /MD /I./ /arch:AVX2 /std:c17 /Zi /Qvec-report:1
 
-stat-jpeg-text.exe: stat-jpeg-text.c $(STATHEADERS)
-	cl stat-jpeg-text.c $(CFLAGS)
-	
-stat-jpeg-pixel.exe: stat-jpeg-pixel.c
-	cl stat-jpeg-pixel.c $(CFLAGS)
+CXXFLAGS=/D_CRT_SECURE_NO_WARNINGS=1 /O2 /nologo /GL /W4 /MD /EHsc /I./ /fp:fast /arch:AVX2 /Zc:__cplusplus /std:c++17 /Zi
 
-clean:
-	del *.obj
+jpeg2json.exe: $*.cpp
+	$(CC) $*.cpp $(CXXFLAGS) /Fe:$@
