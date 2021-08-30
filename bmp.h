@@ -97,7 +97,7 @@ int bmp_write_channels(
 		= bmp_make_dib_hdr(width, height);
 	const struct bmp_header hdr1
 		= bmp_make_header(hdr2);
-	uint32_t *rgba = malloc(4 * width*height);
+	uint32_t *rgba = (uint32_t*)malloc(4 * width*height);
 	if(rgba == NULL){
 		return -1;
 	}
